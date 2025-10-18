@@ -105,33 +105,13 @@ async def ws_transcribe(client_ws: WebSocket):
                     if t == "audio":
                         # Append audio chunk to the current input buffer
                         await openai_ws.send(
-                            json.dumps({
-                                "type": "input_audio_buffer.append",
-                                "audio": data["b64"],  # base64-encoded PCM16
-                            })
+                            json.dumps(
+                                {
+                                    "type": "input_audio_buffer.append",
+                                    "audio": data["b64"],  # base64-encoded PCM16
+                                }
+                            )
                         )
-
-                    # elif t == "commit":
-                    #     # Mark end of an utterance
-                    #     await openai_ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
-
-                    # elif t == "stop":
-                    #     # Ask model to produce a text response for the committed audio
-                    #     await openai_ws.send(json.dumps({
-                    #         "type": "response.create",
-                    #         "response": {
-                    #             "modalities": ["text"],   # we want text back
-                    #             "instructions": "Transcribe the most recent audio.",
-                    #             "language": data.get("language", "en"),  # optional
-                    #             "metadata": {"app": "stt-demo"}
-                    #         },
-                    #         # "model": REALTIME_MODEL
-                    #     }))
-
-                    elif t == "end":
-                        await openai_ws.close()
-                        await client_ws.close()
-                        return
 
             # Task B: forward events from OpenAI -> client
             async def pump_openai_to_client():
