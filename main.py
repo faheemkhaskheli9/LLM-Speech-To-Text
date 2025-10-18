@@ -71,7 +71,7 @@ async def ws_transcribe(client_ws: WebSocket):
                             "input_audio_transcription": {
                                 "model": REALTIME_MODEL,
                                 "prompt": "",
-                                "language": "ur",
+                                "language": "en",
                             },
                             "turn_detection": {
                                 "type": "server_vad",
