@@ -1,0 +1,154 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Realtime Speech-to-Text</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; }
+    button { font-size: 1rem; padding: 0.8rem 1.5rem; }
+    #status { font-weight: 600; margin-left: 10px; }
+    #transcript { white-space: pre-wrap; background: #111; color: #eee; padding: 1rem; border-radius: 8px; min-height: 8rem; }
+  </style>
+</head>
+<body>
+  <h2>Realtime Speech → Text (OpenAI)</h2>
+  <p>
+    <button id="toggleBtn">🎙️ Start</button>
+    <span id="status">Disconnected</span>
+  </p>
+
+  <h3>Live Transcript</h3>
+  <div id="transcript"></div>
+
+  <script>
+    const WS_URL = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws/transcribe";
+
+    const btn = document.getElementById("toggleBtn");
+    const statusEl = document.getElementById("status");
+    const transcriptEl = document.getElementById("transcript");
+
+    let ws = null;
+    let audioCtx = null;
+    let processor = null;
+    let source = null;
+    let stream = null;
+    let recording = false;
+
+    function logStatus(msg) {
+      console.log(msg);
+      statusEl.textContent = msg;
+    }
+
+    // Converts Float32Array -> Int16Array
+    function floatTo16PCM(float32Array) {
+      const buffer = new ArrayBuffer(float32Array.length * 2);
+      const view = new DataView(buffer);
+      let offset = 0;
+      for (let i = 0; i < float32Array.length; i++, offset += 2) {
+        let s = Math.max(-1, Math.min(1, float32Array[i]));
+        view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+      }
+      return buffer;
+    }
+
+    function downsampleBuffer(buffer, inputSampleRate, outSampleRate = 16000) {
+      if (outSampleRate === inputSampleRate) return buffer;
+      const sampleRateRatio = inputSampleRate / outSampleRate;
+      const newLength = Math.round(buffer.length / sampleRateRatio);
+      const result = new Float32Array(newLength);
+      let offsetResult = 0;
+      let offsetBuffer = 0;
+      while (offsetResult < result.length) {
+        const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+        let accum = 0, count = 0;
+        for (let i = offsetBuffer; i < nextOffsetBuffer && i < buffer.length; i++) {
+          accum += buffer[i]; count++;
+        }
+        result[offsetResult++] = accum / count;
+        offsetBuffer = nextOffsetBuffer;
+      }
+      return result;
+    }
+
+    async function connectWS() {
+      return new Promise((resolve, reject) => {
+        const socket = new WebSocket(WS_URL);
+        socket.onopen = () => resolve(socket);
+        socket.onerror = reject;
+        socket.onclose = () => logStatus("Disconnected");
+        socket.onmessage = (event) => {
+          const msg = JSON.parse(event.data);
+          console.log("Received:", msg);
+          if (msg.type === "conversation.item.input_audio_transcription.delta") {
+            transcriptEl.textContent += msg.delta;
+          } else if (msg.type === "conversation.item.input_audio_transcription.completed") {
+            transcriptEl.textContent += "\n";
+          } else if (msg.type === "error") {
+            console.error("OpenAI error:", msg);
+          }
+        };
+      });
+    }
+
+    async function startRecording() {
+      if (recording) return;
+      recording = true;
+      btn.textContent = "⏹ Stop";
+      logStatus("Connecting...");
+
+      ws = await connectWS();
+      logStatus("Recording...");
+
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      source = audioCtx.createMediaStreamSource(stream);
+      processor = audioCtx.createScriptProcessor(4096, 1, 1);
+
+      processor.onaudioprocess = (e) => {
+        if (!recording) return;
+        const input = e.inputBuffer.getChannelData(0);
+        const downsampled = downsampleBuffer(input, audioCtx.sampleRate, 16000);
+        const pcm16 = floatTo16PCM(downsampled);
+        const chunk = btoa(String.fromCharCode(...new Uint8Array(pcm16)));
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "audio", b64: chunk }));
+        }
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+    }
+
+    async function stopRecording() {
+      if (!recording) return;
+      recording = false;
+      btn.textContent = "🎙️ Start";
+      logStatus("Processing...");
+
+      // Tell backend to finalize transcription
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "commit" }));
+        ws.send(JSON.stringify({ type: "stop" }));
+        setTimeout(() => ws.close(), 1500);
+      }
+
+      if (processor) processor.disconnect();
+      if (source) source.disconnect();
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      if (audioCtx) audioCtx.close();
+
+      processor = null; source = null; stream = null; audioCtx = null;
+      logStatus("Stopped");
+    }
+
+    btn.onclick = async () => {
+      if (!recording) {
+        transcriptEl.textContent = "";
+        await startRecording();
+      } else {
+        await stopRecording();
+      }
+    };
+  </script>
+</body>
+</html>
