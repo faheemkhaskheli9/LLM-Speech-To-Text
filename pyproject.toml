@@ -1,0 +1,16 @@
+[project]
+name = "llm-speech-to-text"
+version = "0.1.0"
+description = "Realtime speech-to-text demo: browser mic -> FastAPI WebSocket proxy -> OpenAI Realtime transcription"
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi>=0.108",
+    "uvicorn[standard]>=0.29",
+    "websockets>=13.0,<14",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4", "httpx>=0.27"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,3 +1,7 @@
-fastapi
-uvicorn
-websockets==13.0
+fastapi>=0.108
+uvicorn[standard]>=0.29
+websockets>=13.0,<14
+
+# Testing
+pytest>=7.4
+httpx>=0.27
