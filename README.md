@@ -51,6 +51,12 @@ transcription model (`gpt-4o-transcribe`); without one, the WebSocket
 handshake completes but the server immediately sends
 `{"type": "error", "message": "OPENAI_API_KEY not set"}` and closes.
 
+CORS defaults to `http://localhost:3000,http://127.0.0.1:3000` -- override
+with a comma-separated `CORS_ALLOW_ORIGINS` env var for a real deployed
+frontend's origin. The literal `*` is honored too, but only via that same
+explicit opt-in, and credentials are then disabled automatically (browsers
+reject a wildcard origin combined with credentials).
+
 ## Tests
 
 ```bash

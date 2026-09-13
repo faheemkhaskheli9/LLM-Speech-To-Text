@@ -24,11 +24,30 @@ OPENAI_REALTIME_WS = "wss://api.openai.com/v1/realtime?intent=transcription"
 # choose a realtime-capable transcribe model (OpenAI docs list current names)
 REALTIME_MODEL = "gpt-4o-transcribe"
 
+def _resolve_cors_origins() -> tuple[list[str], bool]:
+    """Restricted-by-default CORS origins, overridable via CORS_ALLOW_ORIGINS.
+
+    Default is localhost-only so this isn't shipped wide-open by accident.
+    A comma-separated env var overrides it (e.g. for a deployed frontend's
+    real origin). The literal wildcard "*" is only honored via that same
+    explicit opt-in -- and per the CORS spec a wildcard origin can't be
+    combined with credentials (a browser rejects it), so credentials are
+    disabled automatically when the wildcard is chosen.
+    """
+    raw = os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    if origins == ["*"]:
+        return ["*"], False
+    return origins, True
+
+
+CORS_ALLOW_ORIGINS, CORS_ALLOW_CREDENTIALS = _resolve_cors_origins()
+
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # tighten in production
-    allow_credentials=True,
+    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_credentials=CORS_ALLOW_CREDENTIALS,
     allow_methods=["*"],
     allow_headers=["*"],
 )
