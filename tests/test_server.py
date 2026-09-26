@@ -64,3 +64,32 @@ def test_module_wires_the_resolved_origins_into_the_app(monkeypatch):
     finally:
         monkeypatch.delenv("CORS_ALLOW_ORIGINS", raising=False)
         importlib.reload(server)
+
+
+def test_health_endpoint_reports_ok():
+    client = TestClient(server.app)
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+def test_ready_endpoint_reports_missing_api_key(monkeypatch):
+    monkeypatch.setattr(server, "OPENAI_API_KEY", None)
+    client = TestClient(server.app)
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "not_ready",
+        "reason": "OPENAI_API_KEY not set",
+    }
+
+
+def test_ready_endpoint_reports_ready_when_api_key_exists(monkeypatch):
+    monkeypatch.setattr(server, "OPENAI_API_KEY", "test-key")
+    client = TestClient(server.app)
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready"}
