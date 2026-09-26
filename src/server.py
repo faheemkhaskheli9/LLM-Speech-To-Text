@@ -51,6 +51,20 @@ async def root():
     return FileResponse(INDEX_HTML)
 
 
+@app.get("/health")
+async def health():
+    """Liveness probe: the FastAPI process is running."""
+    return {"status": "ok"}
+
+
+@app.get("/ready")
+async def ready():
+    """Readiness probe: required runtime configuration is available."""
+    if not OPENAI_API_KEY:
+        return {"status": "not_ready", "reason": "OPENAI_API_KEY not set"}
+    return {"status": "ready"}
+
+
 async def openai_headers():
     return {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
