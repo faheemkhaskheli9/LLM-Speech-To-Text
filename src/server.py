@@ -1,11 +1,9 @@
 # server.py
 import asyncio
-import base64
 import json
 import logging
 import os
 from pathlib import Path
-from typing import Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,29 +11,24 @@ from fastapi.responses import FileResponse
 from websockets import connect as ws_connect
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
+logger = logging.getLogger(__name__)
+
 # Resolved relative to this file (not the process cwd) so `uvicorn
 # server:app` works the same whether launched from src/ or the repo root.
 INDEX_HTML = Path(__file__).resolve().parent / "index.html"
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# Realtime transcription session (note the intent=transcription)
 OPENAI_REALTIME_WS = "wss://api.openai.com/v1/realtime?intent=transcription"
-
-# choose a realtime-capable transcribe model (OpenAI docs list current names)
 REALTIME_MODEL = "gpt-4o-transcribe"
 
-def _resolve_cors_origins() -> tuple[list[str], bool]:
-    """Restricted-by-default CORS origins, overridable via CORS_ALLOW_ORIGINS.
 
-    Default is localhost-only so this isn't shipped wide-open by accident.
-    A comma-separated env var overrides it (e.g. for a deployed frontend's
-    real origin). The literal wildcard "*" is only honored via that same
-    explicit opt-in -- and per the CORS spec a wildcard origin can't be
-    combined with credentials (a browser rejects it), so credentials are
-    disabled automatically when the wildcard is chosen.
-    """
-    raw = os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000")
-    origins = [o.strip() for o in raw.split(",") if o.strip()]
+def _resolve_cors_origins() -> tuple[list[str], bool]:
+    """Restricted-by-default CORS origins, overridable via CORS_ALLOW_ORIGINS."""
+    raw = os.getenv(
+        "CORS_ALLOW_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    )
+    origins = [origin.strip() for origin in raw.split(",") if origin.strip()]
     if origins == ["*"]:
         return ["*"], False
     return origins, True
@@ -59,17 +52,26 @@ async def root():
 
 
 async def openai_headers():
-    return {"Authorization": f"Bearer {OPENAI_API_KEY}", "OpenAI-Beta": "realtime=v1"}
+    return {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "OpenAI-Beta": "realtime=v1",
+    }
+
+
+async def _cancel_task(task: asyncio.Task) -> None:
+    """Cancel a relay task and consume the cancellation cleanly."""
+    if task.done():
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
 
 
 @app.websocket("/ws/transcribe")
 async def ws_transcribe(client_ws: WebSocket):
-    """
-    1) Accept client WebSocket
-    2) Connect to OpenAI Realtime WS (intent=transcription)
-    3) Relay audio chunks & control messages
-    4) Send transcripts back to client
-    """
+    """Proxy browser microphone audio to OpenAI Realtime transcription."""
     await client_ws.accept()
     if not OPENAI_API_KEY:
         await client_ws.send_json(
@@ -80,11 +82,9 @@ async def ws_transcribe(client_ws: WebSocket):
 
     try:
         async with ws_connect(
-            OPENAI_REALTIME_WS, extra_headers=await openai_headers()
+            OPENAI_REALTIME_WS,
+            extra_headers=await openai_headers(),
         ) as openai_ws:
-            # Create a new response stream for transcription output
-            # (We’ll trigger response creation after we start receiving audio)
-            # Some setups auto-start; this explicit request keeps behavior predictable.
             await openai_ws.send(
                 json.dumps(
                     {
@@ -103,75 +103,119 @@ async def ws_transcribe(client_ws: WebSocket):
                                 "silence_duration_ms": 500,
                             },
                             "input_audio_noise_reduction": {"type": "near_field"},
-                            "include": ["item.input_audio_transcription.logprobs"],
+                            "include": [
+                                "item.input_audio_transcription.logprobs"
+                            ],
                         },
                     }
                 )
             )
 
-            # Task A: forward messages from client -> OpenAI
             async def pump_client_to_openai():
-                """
-                Expected from client:
-                - {"type":"start"}           -> optional: begins a user turn
-                - {"type":"audio","b64":...} -> PCM16 mono 16k, base64
-                - {"type":"commit"}          -> finalize current buffer (VAD stop or user stop)
-                - {"type":"stop"}            -> request a response now
-                - {"type":"end"}             -> end session
-                """
+                audio_since_commit = False
+
                 while True:
                     msg = await client_ws.receive_text()
-                    data = json.loads(msg)
-                    # print(data)
-                    t = data.get("type")
+                    try:
+                        data = json.loads(msg)
+                    except json.JSONDecodeError:
+                        await client_ws.send_json(
+                            {
+                                "type": "error",
+                                "message": "Invalid JSON message",
+                            }
+                        )
+                        continue
 
-                    if t == "audio":
-                        # Append audio chunk to the current input buffer
+                    message_type = data.get("type")
+
+                    if message_type == "audio":
+                        audio_b64 = data.get("b64")
+                        if not isinstance(audio_b64, str) or not audio_b64:
+                            await client_ws.send_json(
+                                {
+                                    "type": "error",
+                                    "message": "audio message requires non-empty b64",
+                                }
+                            )
+                            continue
+
                         await openai_ws.send(
                             json.dumps(
                                 {
                                     "type": "input_audio_buffer.append",
-                                    "audio": data["b64"],  # base64-encoded PCM16
+                                    "audio": audio_b64,
                                 }
                             )
                         )
+                        audio_since_commit = True
 
-            # Task B: forward events from OpenAI -> client
+                    elif message_type == "commit":
+                        if audio_since_commit:
+                            await openai_ws.send(
+                                json.dumps({"type": "input_audio_buffer.commit"})
+                            )
+                            audio_since_commit = False
+
+                    elif message_type in {"stop", "end"}:
+                        if audio_since_commit:
+                            await openai_ws.send(
+                                json.dumps({"type": "input_audio_buffer.commit"})
+                            )
+                        return
+
+                    elif message_type == "start":
+                        # The upstream transcription session is already initialized.
+                        continue
+
+                    else:
+                        await client_ws.send_json(
+                            {
+                                "type": "error",
+                                "message": f"Unsupported message type: {message_type}",
+                            }
+                        )
+
             async def pump_openai_to_client():
-                """
-                We forward relevant response events back to client.
-                Typical events:
-                  - response.output_text.delta / completed (streamed transcripts)
-                  - response.completed
-                  - error
-                """
                 while True:
                     raw = await openai_ws.recv()
-                    print(raw)
                     try:
                         event = json.loads(raw)
-                    except Exception:
-                        # Keep raw as string (defensive)
+                    except (TypeError, json.JSONDecodeError):
                         event = {"type": "raw", "data": raw}
-
-                    etype = event.get("type", "")
-                    # Relay everything; the client filters what it needs
                     await client_ws.send_json(event)
 
-            await asyncio.gather(pump_client_to_openai(), pump_openai_to_client())
+            client_task = asyncio.create_task(pump_client_to_openai())
+            openai_task = asyncio.create_task(pump_openai_to_client())
+
+            done, pending = await asyncio.wait(
+                {client_task, openai_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            for task in done:
+                exc = task.exception()
+                if exc:
+                    raise exc
+
+            for task in pending:
+                await _cancel_task(task)
 
     except (WebSocketDisconnect, ConnectionClosedOK):
         pass
-    except ConnectionClosedError as e:
-        logging.exception("OpenAI WS closed with error: %s", e)
+    except ConnectionClosedError as exc:
+        logger.exception("OpenAI WebSocket closed with error: %s", exc)
         try:
-            await client_ws.send_json({"type": "error", "message": str(e)})
+            await client_ws.send_json({"type": "error", "message": str(exc)})
         except Exception:
             pass
-    except Exception as e:
-        logging.exception("Server error: %s", e)
+    except Exception as exc:
+        logger.exception("Transcription server error: %s", exc)
         try:
-            await client_ws.send_json({"type": "error", "message": str(e)})
+            await client_ws.send_json({"type": "error", "message": str(exc)})
         except Exception:
             pass
-        await client_ws.close()
+        try:
+            await client_ws.close()
+        except Exception:
+            pass
