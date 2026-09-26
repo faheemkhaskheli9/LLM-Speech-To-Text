@@ -68,3 +68,46 @@ real microphone (both out of scope for CI): the HTTP routes the server
 exposes and that the setup docs above stay in sync with the actual code
 (README/`.env.example` referencing the right variable name, `index.html`
 existing where the server expects it).
+
+
+## WebSocket control messages
+
+The browser-to-server WebSocket accepts these client message types:
+
+- `audio`: append a base64-encoded PCM16 audio chunk.
+- `commit`: explicitly commit buffered audio when audio is pending.
+- `stop`: commit any remaining audio and end the client-to-provider relay.
+- `end`: same finalization behavior as `stop`, intended for explicit session teardown.
+- `start`: accepted as a no-op because the upstream transcription session is initialized when the WebSocket connects.
+
+Malformed JSON, unsupported message types, and empty audio payloads are returned to the client as structured error messages.
+
+## Health checks
+
+Two operational endpoints are available:
+
+```text
+GET /health
+GET /ready
+```
+
+`/health` reports process liveness. `/ready` reports whether the required OpenAI API key is configured.
+
+## Docker
+
+Build and run locally:
+
+```bash
+docker build -t llm-speech-to-text .
+docker run --rm -p 8000:8000 \
+  -e OPENAI_API_KEY="$OPENAI_API_KEY" \
+  llm-speech-to-text
+```
+
+Open http://127.0.0.1:8000/ after the container starts.
+
+The image runs as a non-root user and includes a Docker health check against `/health`.
+
+## Continuous integration
+
+GitHub Actions runs the test suite for Python 3.10, 3.11, and 3.12 on pushes to `main` and on pull requests.
